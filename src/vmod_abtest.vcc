@@ -13,3 +13,4 @@ Function STRING get_rules(PRIV_VCL)
 
 Function DURATION get_duration(PRIV_VCL, STRING)
 Function STRING get_expire(PRIV_VCL, STRING)
+Function STRING get_name(PRIV_VCL, STRING)

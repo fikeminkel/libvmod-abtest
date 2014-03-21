@@ -37,11 +37,13 @@
     }
 
 #define VMOD_ABTEST_MAGIC 0xDD2914D8
-#define CONF_REGEX "([^:\r\n]+):(([[:alnum:]_]+:[[:digit:]]+;)+(([[:digit:]]*);)?)"
+//#define CONF_REGEX "([^:\r\n]+):(([[:alnum:]_]+:[[:digit:]]+;)+(([[:digit:]]*);)?)"
+#define CONF_REGEX "([[:alnum:]_]+):([^:\r\n]+):(([[:alnum:]_]+:[[:digit:]]+;)+(([[:digit:]]*);)?)"
 #define RULE_REGEX "([[:alnum:]_]+):([[:digit:]]+);"
 #define TIME_REGEX ";([[:digit:]]+);"
 
 struct rule {
+    char* name;
     char* key;
     unsigned num;
     double duration;
@@ -93,6 +95,7 @@ static void cfg_free(struct vmod_abtest *cfg) {
 }
 
 static void delete_rule(struct rule* r) {
+        FREE_FIELD(r->name);
         FREE_FIELD(r->key);
         FREE_FIELD(r->weights);
         FREE_FIELD(r->norm_weights);
@@ -136,7 +139,6 @@ static struct rule* get_text_rule(struct vmod_abtest *cfg, const char *key) {
     }
     return NULL;
 }
-
 
 static void alloc_key_regex(struct sess *sp, struct vmod_abtest *cfg, struct rule* rule, const char *key) {
     if (cfg->use_text_key) {
@@ -333,7 +335,7 @@ int __match_proto__() vmod_load_config(struct sess *sp, struct vmod_priv *priv, 
     char *s;
     int r;
     regex_t regex;
-    regmatch_t match[3];
+    regmatch_t match[4];
     struct rule *rule;
     struct vmod_abtest* cfg;
 
@@ -373,17 +375,20 @@ int __match_proto__() vmod_load_config(struct sess *sp, struct vmod_priv *priv, 
     AZ(fclose(f));
 
     s = buf;
-    while ((r = regexec(&regex, s, 3, match, 0)) == 0) {
+    while ((r = regexec(&regex, s, 4, match, 0)) == 0) {
         *(s + match[0].rm_eo) = 0;
+        LOG_ERR(sp, "varnish: vmod_abtest: parsing rule");
 
         rule = (struct rule*)calloc(sizeof(struct rule), 1);
         AN(rule);
 
         VTAILQ_INSERT_TAIL(&cfg->rules, rule, list);
-
-        DUP_MATCH(rule->key, s, match[1]);
+        DUP_MATCH(rule->name, s, match[1]);
+        LOG_ERR(sp, "varnish: vmod_abtest: rule name: '%s'", rule->name);
+        DUP_MATCH(rule->key, s, match[2]);
+        LOG_ERR(sp, "varnish: vmod_abtest: rule key: '%s'", rule->key);
         alloc_key_regex(sp, cfg, rule, rule->key);
-        parse_rule(sp, rule, s + match[2].rm_so);
+        parse_rule(sp, rule, s + match[3].rm_so);
 
         s += match[0].rm_eo + 1;
     }
@@ -415,6 +420,7 @@ int __match_proto__() vmod_load_config(struct sess *sp, struct vmod_priv *priv, 
     return 0;
 }
 
+// TODO: add rule->name to save_config
 int __match_proto__() vmod_save_config(struct sess *sp, struct vmod_priv *priv, const char *target) {
     AN(target);
 
@@ -438,7 +444,7 @@ int __match_proto__() vmod_save_config(struct sess *sp, struct vmod_priv *priv, 
 
     VTAILQ_FOREACH(r, &((struct vmod_abtest*) priv->priv)->rules, list) {
         int i;
-        fprintf(f, "%s:", r->key);
+        fprintf(f, "%s:%s:", r->name, r->key);
         for (i = 0; i < r->num; i++) {
             fprintf(f, "%s:%d;", r->options[i], r->weights[i]);
         }
@@ -478,6 +484,7 @@ const char* __match_proto__() vmod_get_rand(struct sess *sp, struct vmod_priv *p
         AZ(pthread_rwlock_unlock(&cfg_rwl));
         return NULL;
     }
+    LOG_ERR(sp, "varnish: vmod_abtest.get_rand() rule name: %s", rule->name);
 
     n = drand48();
     l = 0;
@@ -599,5 +606,29 @@ const char*  __match_proto__() vmod_get_expire(struct sess *sp, struct vmod_priv
     char* expire = VRT_time_string(sp, TIM_real() + duration);
 
     AZ(pthread_rwlock_unlock(&cfg_rwl));
+    LOG_ERR(sp, "varnish: vmod_abtest.get_expire(): %s", expire);
     return expire;
 }
+
+const char*  __match_proto__() vmod_get_name(struct sess *sp, struct vmod_priv *priv, const char *key) {
+    LOG_ERR(sp, "varnish: vmod_abtest.get_name(): key: '%s'", key);
+    AN(key);
+
+    struct rule *rule;
+    if (priv->priv == NULL) {
+        return NULL;
+    }
+
+    AZ(pthread_rwlock_rdlock(&cfg_rwl));
+
+    rule = ((struct vmod_abtest*)priv->priv)->get_rule(priv->priv, key);
+    if (rule == NULL) {
+        AZ(pthread_rwlock_unlock(&cfg_rwl));
+        return NULL;
+    }
+    LOG_ERR(sp, "varnish: vmod_abtest.get_name(): %s", rule->name);
+    AZ(pthread_rwlock_unlock(&cfg_rwl));
+    return rule->name;
+}
+
+
